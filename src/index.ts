@@ -2,7 +2,8 @@ import axios from 'axios';
 import cheerio from 'cheerio';
 const repo = 'dotnetthailand/dotnetthailand.github.io';
 const contentPath = 'content/frontend-web/css-sass/fixing-a-floating-footer-at-the-bottom.mdx';
-console.log("test")
+
+let deepSearchLevel = 1;
 
 const axiosConfig = {
     headers: {
@@ -10,56 +11,128 @@ const axiosConfig = {
     }
 }
 
-const fetchContributors = async () => {
-    const contributorsGithubAPI = `https://api.github.com/repos/${repo}/commits?path=${contentPath}`;
-    const githubResponseData = (await axios.get(contributorsGithubAPI, axiosConfig)).data;
+export interface IAuthorInfo {
+    username: string;
+    name: string;
+    commitsCount: number;
+    profileUrl: string;
+    avatarUrl: string;
+}
 
-    if (!githubResponseData[0]?.url) return;
-    const commitOfTheFile = (await axios.get(githubResponseData[0].url, axiosConfig)).data;
+const getCurrentCommitApi = (commitSha: string) => `https://api.github.com/repos/${repo}/commits/${commitSha}`; 
+
+const extractRenameAction = async (url: string) => {
+    console.log(`extractRenameAction: ${url}`)
+    const commitOfTheFile = (await axios.get(url, axiosConfig)).data;
     const changedFile = commitOfTheFile.files.filter((file: any) => file.filename === `${contentPath}`)[0];
     // No rename file action, no need find more deep contributors.
     if (!changedFile?.previous_filename){
         console.warn("No previous_filename")
-        return;
+        return undefined;
     }
 
+    return changedFile?.previous_filename;
+}
+
+const fetchContributors = async () => {
+    // One File contains multiples commit.
+    const contributorsGithubAPI = `https://api.github.com/repos/${repo}/commits?path=${contentPath}`;
+    const githubResponseData = (await axios.get(contributorsGithubAPI, axiosConfig)).data;
+    console.log(contributorsGithubAPI)
+    if (!githubResponseData[0]?.url) return;
+
     return {
-        previousFilename: changedFile?.previous_filename,
-        parentCommitSha: githubResponseData[0]?.parents[0]?.sha
+        previousFilename: await extractRenameAction(githubResponseData[0].url),
+        // Get from parent
+        commitSha: githubResponseData[0]?.parents[0]?.sha
     };
 }
 
+const findAuthor = (key: string, authors: IAuthorInfo[]) => {
+    for(let i = 0;i < authors.length; i++)
+        if( authors[i].username === key){
+            return i;
+        }
+    return -1;
+}
 
-const fetchDeepContributors = async () => {
-    // const changedFile: Record<string, string> = {};
-    // changedFile.previous_filename = '/config/config.yml';
-    // const parentCommitSha = '7f25cafa12f362e79942e67839af39ca9a9fa7cf';
-
-    const contributors = await fetchContributors();
-    const blobHtmlUrl = `https://github.com/dotnetthailand/dotnetthailand.github.io/blob/${contributors?.parentCommitSha}/${contributors?.previousFilename}`
+const fetchDeepContributors = async (previousFilename: string, commitSha: string, authors: IAuthorInfo[]): Promise<IAuthorInfo[]> => {
+    console.log(`Deep Search Level: ${deepSearchLevel++}`)
+    if (!previousFilename) {
+        console.log('No previousFilename')
+        return [];
+    }
+        
+    const blobHtmlUrl = `https://github.com/dotnetthailand/dotnetthailand.github.io/blob/${commitSha}/${previousFilename}`
     const blobHtml = (await axios.get(blobHtmlUrl)).data;
 
     const $ = cheerio.load(blobHtml);
     const numberOfContributors = Number.parseInt($('#blob_contributors_box').find('.Link--primary').find('strong').text());
-    const usernameList: string[] = [];
+
+    const currentCommitApi = getCurrentCommitApi(commitSha);
+    const commitData = (await axios.get(currentCommitApi, axiosConfig)).data;
+
     if (numberOfContributors === 1) {
-        const api = `https://api.github.com/repos/${repo}/commits/${contributors?.parentCommitSha}`;
-        const commitData = (await axios.get(api, axiosConfig)).data;
         const username = commitData?.author?.login || commitData?.commit?.author.email;
-        usernameList.push(username)
+        const indexAuthor= findAuthor(username, authors);
+        if(indexAuthor > 0){
+            authors[indexAuthor].commitsCount ++;
+        }else {
+            authors.push({
+                username,
+                name: commitData?.commit?.author.name,
+                profileUrl: commitData?.author?.html_url || commitData?.html_url,
+                avatarUrl: commitData?.author?.avatar_url,
+                commitsCount: 1, // default to 1
+            })
+        }
     } else {
         console.log(`numberOfContributors > 1`);
+        const usernameTasks: Promise<any>[] = [];
         const result = $('#blob_contributors_box').siblings().find('.avatar-user')
         for (let i = 0; i < result.length; i++){
             const username = result[i].attribs.alt.replace(/(^\@)/g, '');
-            usernameList.push(username)
+            usernameTasks.push(axios.get(`https://api.github.com/users/${username}`, axiosConfig))
         }
+        if(result.length === 0){
+            console.error($('#blob_contributors_box').html())
+        }
+        const usernameList = await Promise.all(usernameTasks);
+        usernameList.forEach( (response: any) => {
+            const username = response?.data.login;
+            const indexAuthor= findAuthor(username, authors);
+            if(indexAuthor > 0){
+                authors[indexAuthor].commitsCount ++;
+            }else {
+                authors.push({
+                    username: response?.data.login,
+                    name: response?.data.name,
+                    profileUrl: response?.data.html_url,
+                    avatarUrl: response?.data.avatar_url,
+                    commitsCount: 1, // default to 1
+                })
+            }
+        });
     }
-    return usernameList;
+
+    const parentCommitSha = commitData?.parents[0]?.sha;
+    const parentCommitApi = getCurrentCommitApi(parentCommitSha);
+    const parentPreviousFileName = await extractRenameAction(parentCommitApi);
+    if(parentPreviousFileName){
+        fetchDeepContributors(parentPreviousFileName, parentCommitSha, authors);
+    }
+    return authors;
 }
 
 async function main() {
-    const usernameList = await fetchDeepContributors();
+    console.log("Start")
+    // const contributors: Record<string, string> = {};
+    // contributors.previousFilename = '/config/config.yml';
+    // contributors.commitSha = '7f25cafa12f362e79942e67839af39ca9a9fa7cf';
+    const initAuthors: IAuthorInfo[] = [];
+    const contributors = await fetchContributors();
+    console.log(contributors)
+    const usernameList = await fetchDeepContributors(contributors?.previousFilename, contributors?.commitSha, initAuthors);
     console.log(usernameList)
 }
 
