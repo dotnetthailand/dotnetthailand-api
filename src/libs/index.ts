@@ -1,9 +1,7 @@
 import axios from 'axios';
 import cheerio from 'cheerio';
 const repo = 'dotnetthailand/dotnetthailand.github.io';
-const contentPath = 'content/frontend-web/css-sass/fixing-a-floating-footer-at-the-bottom.mdx';
 
-let deepSearchLevel = 1;
 
 const axiosConfig = {
     headers: {
@@ -21,7 +19,7 @@ export interface IAuthorInfo {
 
 const getCurrentCommitApi = (commitSha: string) => `https://api.github.com/repos/${repo}/commits/${commitSha}`; 
 
-const extractRenameAction = async (url: string) => {
+const extractRenameAction = async (url: string, contentPath: string) => {
     console.log(`extractRenameAction: ${url}`)
     const commitOfTheFile = (await axios.get(url, axiosConfig)).data;
     const changedFile = commitOfTheFile.files.filter((file: any) => file.filename === `${contentPath}`)[0];
@@ -34,17 +32,40 @@ const extractRenameAction = async (url: string) => {
     return changedFile?.previous_filename;
 }
 
-const fetchContributors = async () => {
+export const fetchContributors = async (contentPath: string, authors: IAuthorInfo[]) => {
     // One File contains multiples commit.
     const contributorsGithubAPI = `https://api.github.com/repos/${repo}/commits?path=${contentPath}`;
     const githubResponseData = (await axios.get(contributorsGithubAPI, axiosConfig)).data;
     console.log(contributorsGithubAPI)
-    if (!githubResponseData[0]?.url) return;
+    // if (!githubResponseData[0]?.url) return [];
+
+    const result: any[] = [];
+    for(let i=0; i< githubResponseData.length; i++){
+
+        const username = githubResponseData[0]?.author?.login || githubResponseData[0]?.commit?.author.email;
+        const indexAuthor= findAuthor(username, authors);
+        if(indexAuthor > 0){
+            authors[indexAuthor].commitsCount ++;
+        }else {
+            authors.push({
+                username,
+                name: githubResponseData[0]?.commit?.author.name,
+                profileUrl: githubResponseData[0]?.author?.html_url || githubResponseData[0]?.html_url,
+                avatarUrl: githubResponseData[0]?.author?.avatar_url,
+                commitsCount: 1, // default to 1
+            })
+        }
+
+         result.push({
+            previousFilename: await extractRenameAction(githubResponseData[0]?.url, contentPath),
+            // Get from parent
+            commitSha: githubResponseData[0]?.parents[0]?.sha
+        }); 
+    }
 
     return {
-        previousFilename: await extractRenameAction(githubResponseData[0].url),
-        // Get from parent
-        commitSha: githubResponseData[0]?.parents[0]?.sha
+        deepSearch: result,
+        authors
     };
 }
 
@@ -56,7 +77,7 @@ const findAuthor = (key: string, authors: IAuthorInfo[]) => {
     return -1;
 }
 
-const fetchDeepContributors = async (previousFilename: string, commitSha: string, authors: IAuthorInfo[]): Promise<IAuthorInfo[]> => {
+export const fetchDeepContributors = async (contentPath: string, previousFilename: string, commitSha: string, authors: IAuthorInfo[], deepSearchLevel: number): Promise<IAuthorInfo[]> => {
     console.log(`Deep Search Level: ${deepSearchLevel++}`)
     if (!previousFilename) {
         console.log('No previousFilename')
@@ -65,6 +86,7 @@ const fetchDeepContributors = async (previousFilename: string, commitSha: string
         
     const blobHtmlUrl = `https://github.com/dotnetthailand/dotnetthailand.github.io/blob/${commitSha}/${previousFilename}`
     const blobHtml = (await axios.get(blobHtmlUrl)).data;
+    console.log(`blobHtmlUrl: ${blobHtmlUrl}`)
 
     const $ = cheerio.load(blobHtml);
     const numberOfContributors = Number.parseInt($('#blob_contributors_box').find('.Link--primary').find('strong').text());
@@ -97,6 +119,7 @@ const fetchDeepContributors = async (previousFilename: string, commitSha: string
         if(result.length === 0){
             console.error($('#blob_contributors_box').html())
         }
+        console.log(`Debug ${$('#blob_contributors_box').html()}`)
         const usernameList = await Promise.all(usernameTasks);
         usernameList.forEach( (response: any) => {
             const username = response?.data.login;
@@ -117,23 +140,23 @@ const fetchDeepContributors = async (previousFilename: string, commitSha: string
 
     const parentCommitSha = commitData?.parents[0]?.sha;
     const parentCommitApi = getCurrentCommitApi(parentCommitSha);
-    const parentPreviousFileName = await extractRenameAction(parentCommitApi);
+    const parentPreviousFileName = await extractRenameAction(parentCommitApi, contentPath);
     if(parentPreviousFileName){
-        fetchDeepContributors(parentPreviousFileName, parentCommitSha, authors);
+        fetchDeepContributors(contentPath, parentPreviousFileName, parentCommitSha, authors, deepSearchLevel);
     }
     return authors;
 }
 
 async function main() {
     console.log("Start")
+    const contentPath = 'content/frontend-web/css-sass/fixing-a-floating-footer-at-the-bottom.mdx';
     // const contributors: Record<string, string> = {};
     // contributors.previousFilename = '/config/config.yml';
     // contributors.commitSha = '7f25cafa12f362e79942e67839af39ca9a9fa7cf';
     const initAuthors: IAuthorInfo[] = [];
-    const contributors = await fetchContributors();
-    console.log(contributors)
-    const usernameList = await fetchDeepContributors(contributors?.previousFilename, contributors?.commitSha, initAuthors);
+    const { deepSearch, authors} = await fetchContributors(contentPath, initAuthors);
+    const contributor = deepSearch.length > 0? deepSearch[0]: undefined;
+    console.log(deepSearch)
+    const usernameList = await fetchDeepContributors(contentPath, contributor?.previousFilename, contributor?.commitSha, authors, 1);
     console.log(usernameList)
 }
-
-main();
