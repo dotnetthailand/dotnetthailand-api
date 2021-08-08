@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import { StatusCodes, ReasonPhrases } from 'http-status-codes';
-import { fetchContributors, fetchDeepContributors, IAuthorInfo } from '../libs';
+import { fetchContributors, fetchDeepContributors, IAuthorInfo } from '../libs/deepContributors';
 
 export async function findDeepContributors(req: Request, res: Response) {
     const { path } = req.query;
